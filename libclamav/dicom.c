@@ -26,6 +26,7 @@
 
 #include "clamav.h"
 #include "others.h"
+#include "scanners.h"
 #include "fmap.h"
 #include "dicom.h"
 
@@ -40,6 +41,14 @@
 
 #define DICOM_TAG(g, e) (((uint32_t)(g) << 16) | (e))
 #define TAG_TRANSFER_SYNTAX_UID DICOM_TAG(0x0002, 0x0010)
+#define TAG_ENCAPSULATED_DOC DICOM_TAG(0x0042, 0x0011)
+#define TAG_PIXEL_DATA DICOM_TAG(0x7FE0, 0x0010)
+#define TAG_ITEM DICOM_TAG(0xFFFE, 0xE000)
+#define TAG_ITEM_DELIM DICOM_TAG(0xFFFE, 0xE00D)
+#define TAG_SEQ_DELIM DICOM_TAG(0xFFFE, 0xE0DD)
+
+#define DICOM_UNDEFINED_LENGTH 0xFFFFFFFFu
+#define DICOM_MAX_SQ_DEPTH 16
 
 /* Transfer syntax UIDs that change how the dataset must be read */
 #define TS_IMPLICIT_VR_LE "1.2.840.10008.1.2"
@@ -194,9 +203,337 @@ static void dicom_parse_file_meta(cli_ctx *ctx, dicom_metadata *meta)
     dicom_apply_transfer_syntax(meta);
 }
 
+/*
+ * Re-inject one extracted region into the engine. The engine re-detects the
+ * child's type and recurses (ZIP/PNG/PE/PDF inside a fragment all get their
+ * native parsers) under MaxRecursion/MaxFiles/MaxScanSize.
+ *
+ * Children over the limits are skipped, not fatal. Child parse errors do not
+ * fail the DICOM scan (the raw scan of the whole file still happens at this
+ * type's layer). Only CL_VIRUS and hard engine errors propagate.
+ */
+static cl_error_t dicom_scan_child(cli_ctx *ctx, size_t off, size_t len,
+                                   const char *name, bool *found)
+{
+    cl_error_t ret;
+
+    if (0 == len) {
+        return CL_SUCCESS;
+    }
+
+    ret = cli_checklimits("dicom", ctx, (uint64_t)len, 0, 0);
+    if (CL_SUCCESS != ret) {
+        cli_dbgmsg("dicom: skipping %s (%zu bytes) due to limits\n", name, len);
+        return CL_SUCCESS;
+    }
+
+    ret = cli_magic_scan_nested_fmap_type(ctx->fmap, off, len, ctx,
+                                          CL_TYPE_ANY, name, LAYER_ATTRIBUTES_NONE);
+    if (CL_VIRUS == ret) {
+        *found = true;
+        if (SCAN_ALLMATCHES) {
+            return CL_SUCCESS;
+        }
+        return CL_VIRUS;
+    }
+    if (CL_ETIMEOUT == ret || CL_EMEM == ret) {
+        return ret;
+    }
+    if (CL_SUCCESS != ret) {
+        cli_dbgmsg("dicom: child %s scan returned %d, continuing\n", name, ret);
+    }
+    return CL_SUCCESS;
+}
+
+/*
+ * Walk the item sequence of encapsulated pixel data: (FFFE,E000) items up to
+ * the (FFFE,E0DD) sequence delimiter. Item 0 is normally the Basic Offset
+ * Table, but malformed writers omit it — scan every non-empty item rather
+ * than risk skipping a frame. Each item payload is a compressed frame
+ * (JPEG/J2K/RLE), which is exactly the content the raw signature scan cannot
+ * see through.
+ *
+ * *endpos is set to the first byte after the sequence delimiter (or where
+ * parsing stopped).
+ */
+static cl_error_t dicom_scan_encap_pixeldata(cli_ctx *ctx, size_t off, size_t end,
+                                             unsigned *n_extracted, bool *found,
+                                             size_t *endpos)
+{
+    fmap_t *map    = ctx->fmap;
+    cl_error_t ret = CL_SUCCESS;
+    unsigned frag  = 0;
+
+    while (off + 8 <= end) {
+        const uint8_t *p = fmap_need_off_once(map, off, 8);
+        uint16_t group, element;
+        uint32_t length;
+
+        if (NULL == p) {
+            ret = CL_EPARSE;
+            break;
+        }
+        group   = (uint16_t)cli_readint16(p);
+        element = (uint16_t)cli_readint16(p + 2);
+        length  = (uint32_t)cli_readint32(p + 4);
+        off += 8;
+
+        if (TAG_SEQ_DELIM == DICOM_TAG(group, element)) {
+            break;
+        }
+        if (TAG_ITEM != DICOM_TAG(group, element) ||
+            DICOM_UNDEFINED_LENGTH == length || off + length > end) {
+            cli_dbgmsg("dicom: malformed pixel-data fragment at %zu (tag %04x,%04x len %u)\n",
+                       off - 8, group, element, length);
+            ret = CL_EPARSE;
+            break;
+        }
+
+        if (length > 0) {
+            char name[48];
+            snprintf(name, sizeof(name), "dicom_pixel_fragment_%u", frag);
+            ret = dicom_scan_child(ctx, off, length, name, found);
+            if (CL_SUCCESS != ret) {
+                break;
+            }
+            (*n_extracted)++;
+        }
+        frag++;
+        off += length;
+
+        if (CL_SUCCESS != cli_checktimelimit(ctx)) {
+            ret = CL_ETIMEOUT;
+            break;
+        }
+    }
+
+    *endpos = off;
+    return ret;
+}
+
+static cl_error_t dicom_walk_elements(cli_ctx *ctx, const dicom_metadata *meta,
+                                      size_t off, size_t end, unsigned depth,
+                                      unsigned *n_extracted, bool *found,
+                                      size_t *endpos);
+
+/*
+ * Walk the (FFFE,E000) items of a sequence (SQ). `lim` bounds the sequence:
+ * for a defined-length SQ it is the end of the value; for undefined length it
+ * is the enclosing boundary, and the (FFFE,E0DD) delimiter terminates the
+ * loop. Each item body is a nested dataset and is walked recursively.
+ */
+static cl_error_t dicom_walk_sq_items(cli_ctx *ctx, const dicom_metadata *meta,
+                                      size_t off, size_t lim, unsigned depth,
+                                      unsigned *n_extracted, bool *found,
+                                      size_t *endpos)
+{
+    fmap_t *map    = ctx->fmap;
+    cl_error_t ret = CL_SUCCESS;
+
+    while (off + 8 <= lim) {
+        const uint8_t *p = fmap_need_off_once(map, off, 8);
+        uint16_t group, element;
+        uint32_t length;
+        size_t stop = 0;
+
+        if (NULL == p) {
+            ret = CL_EPARSE;
+            break;
+        }
+        group   = (uint16_t)cli_readint16(p);
+        element = (uint16_t)cli_readint16(p + 2);
+        length  = (uint32_t)cli_readint32(p + 4);
+        off += 8;
+
+        if (TAG_SEQ_DELIM == DICOM_TAG(group, element)) {
+            break;
+        }
+        if (TAG_ITEM != DICOM_TAG(group, element)) {
+            cli_dbgmsg("dicom: expected SQ item at %zu, got (%04x,%04x)\n",
+                       off - 8, group, element);
+            ret = CL_EPARSE;
+            break;
+        }
+
+        if (DICOM_UNDEFINED_LENGTH == length) {
+            /* item body runs to its (FFFE,E00D) delimiter */
+            ret = dicom_walk_elements(ctx, meta, off, lim, depth + 1,
+                                      n_extracted, found, &stop);
+            off = stop;
+        } else {
+            if (off + length > lim) {
+                cli_dbgmsg("dicom: SQ item length %u exceeds sequence bounds at %zu\n",
+                           length, off - 8);
+                ret = CL_EPARSE;
+                break;
+            }
+            ret = dicom_walk_elements(ctx, meta, off, off + length, depth + 1,
+                                      n_extracted, found, &stop);
+            off += length;
+        }
+        if (CL_SUCCESS != ret) {
+            break;
+        }
+    }
+
+    *endpos = off;
+    return ret;
+}
+
+/*
+ * Walk data elements in [off, end). At depth > 0 (inside an undefined-length
+ * SQ item) an (FFFE,E00D) item delimiter terminates the walk; *endpos is set
+ * past it.
+ *
+ * Extraction targets:
+ *   - (7FE0,0010) PixelData, undefined length -> encapsulated fragment walk
+ *   - (7FE0,0010) PixelData, defined length   -> re-inject (polyglot guard)
+ *   - (0042,0011) EncapsulatedDocument        -> re-inject (PDF/CDA get their
+ *                                                native parser, which the raw
+ *                                                scan at this layer won't run)
+ *   - SQ / undefined-length elements          -> recurse into items
+ *
+ * Implicit-VR limitation (documented): without a tag dictionary a
+ * defined-length SQ is indistinguishable from a binary blob, so it is
+ * skipped opaquely; undefined-length elements are still recursed.
+ */
+static cl_error_t dicom_walk_elements(cli_ctx *ctx, const dicom_metadata *meta,
+                                      size_t off, size_t end, unsigned depth,
+                                      unsigned *n_extracted, bool *found,
+                                      size_t *endpos)
+{
+    fmap_t *map    = ctx->fmap;
+    cl_error_t ret = CL_SUCCESS;
+
+    if (depth > DICOM_MAX_SQ_DEPTH) {
+        cli_dbgmsg("dicom: SQ nesting deeper than %u, stopping descent\n",
+                   DICOM_MAX_SQ_DEPTH);
+        *endpos = end;
+        return CL_SUCCESS;
+    }
+
+    while (off + 8 <= end) {
+        const uint8_t *p = fmap_need_off_once(map, off, 8);
+        uint16_t group, element;
+        uint32_t tag;
+        uint8_t vr[2] = {0, 0};
+        uint32_t length;
+        size_t header_len;
+        bool is_sq = false;
+
+        if (NULL == p) {
+            ret = CL_EPARSE;
+            break;
+        }
+        group   = (uint16_t)cli_readint16(p);
+        element = (uint16_t)cli_readint16(p + 2);
+        tag     = DICOM_TAG(group, element);
+
+        if (TAG_ITEM_DELIM == tag || TAG_SEQ_DELIM == tag) {
+            off += 8;
+            if (depth > 0) {
+                break; /* end of this item */
+            }
+            cli_dbgmsg("dicom: stray delimiter (%04x,%04x) at top level\n",
+                       group, element);
+            continue;
+        }
+
+        if (meta->explicit_vr && TAG_ITEM != tag) {
+            vr[0] = p[4];
+            vr[1] = p[5];
+            if (!vr_is_valid(vr)) {
+                cli_dbgmsg("dicom: invalid VR %02x%02x at %zu\n", vr[0], vr[1], off);
+                ret = CL_EPARSE;
+                break;
+            }
+            if (vr_has_long_length(vr)) {
+                const uint8_t *q = fmap_need_off_once(map, off + 8, 4);
+                if (NULL == q) {
+                    ret = CL_EPARSE;
+                    break;
+                }
+                length     = (uint32_t)cli_readint32(q);
+                header_len = 12;
+            } else {
+                length     = (uint16_t)cli_readint16(p + 6);
+                header_len = 8;
+            }
+            is_sq = ('S' == vr[0] && 'Q' == vr[1]);
+        } else {
+            /* implicit VR (or item tag): 32-bit length, no VR field */
+            length     = (uint32_t)cli_readint32(p + 4);
+            header_len = 8;
+        }
+
+        if (DICOM_UNDEFINED_LENGTH == length) {
+            size_t stop = 0;
+
+            if (TAG_PIXEL_DATA == tag) {
+                ret = dicom_scan_encap_pixeldata(ctx, off + header_len, end,
+                                                 n_extracted, found, &stop);
+            } else {
+                /* SQ, or UN/implicit element parsed as a sequence */
+                ret = dicom_walk_sq_items(ctx, meta, off + header_len, end,
+                                          depth, n_extracted, found, &stop);
+            }
+            if (CL_SUCCESS != ret) {
+                break;
+            }
+            off = stop;
+            continue;
+        }
+
+        if (length > map->len || off + header_len + length > end) {
+            cli_dbgmsg("dicom: element (%04x,%04x) length %u exceeds bounds at %zu\n",
+                       group, element, length, off);
+            ret = CL_EPARSE;
+            break;
+        }
+
+        if (is_sq) {
+            size_t stop = 0;
+            ret = dicom_walk_sq_items(ctx, meta, off + header_len,
+                                      off + header_len + length, depth,
+                                      n_extracted, found, &stop);
+            if (CL_SUCCESS != ret) {
+                break;
+            }
+        } else if (TAG_PIXEL_DATA == tag) {
+            ret = dicom_scan_child(ctx, off + header_len, length,
+                                   "dicom_pixel_data", found);
+            if (CL_SUCCESS != ret) {
+                break;
+            }
+            (*n_extracted)++;
+        } else if (TAG_ENCAPSULATED_DOC == tag) {
+            ret = dicom_scan_child(ctx, off + header_len, length,
+                                   "dicom_encapsulated_document", found);
+            if (CL_SUCCESS != ret) {
+                break;
+            }
+            (*n_extracted)++;
+        }
+
+        off += header_len + length;
+
+        if (CL_SUCCESS != cli_checktimelimit(ctx)) {
+            ret = CL_ETIMEOUT;
+            break;
+        }
+    }
+
+    *endpos = off;
+    return ret;
+}
+
 cl_error_t cli_scandicom(cli_ctx *ctx)
 {
     dicom_metadata meta;
+    cl_error_t ret;
+    unsigned n_extracted = 0;
+    bool found           = false;
+    size_t endpos        = 0;
 
     if (NULL == ctx || NULL == ctx->fmap) {
         return CL_ENULLARG;
@@ -214,14 +551,32 @@ cl_error_t cli_scandicom(cli_ctx *ctx)
                meta.encapsulated ? ", encapsulated pixel data" : "",
                meta.dataset_offset);
 
-    /* TODO (next commits):
-     *   - deflated: inflate the dataset (raw DEFLATE) into a buffer under
-     *     cli_checklimits, then cli_magic_scan_buff() it.
-     *   - element walk of the dataset: extract encapsulated pixel-data
-     *     fragments (7FE0,0010 undefined length), embedded documents
-     *     (0042,0011) and native OB/OW blobs, re-injecting each via
-     *     cli_magic_scan_nested_fmap_type().
-     */
+    if (meta.big_endian) {
+        /* retired Explicit VR Big Endian: rare; raw scan only for now */
+        cli_dbgmsg("dicom: big-endian transfer syntax not walked\n");
+        return CL_SUCCESS;
+    }
+    if (meta.deflated) {
+        /* TODO: inflate the dataset (raw DEFLATE) under cli_checklimits and
+         * cli_magic_scan_buff() the result */
+        cli_dbgmsg("dicom: deflated dataset not yet inflated\n");
+        return CL_SUCCESS;
+    }
 
-    return CL_SUCCESS;
+    ret = dicom_walk_elements(ctx, &meta, meta.dataset_offset, ctx->fmap->len,
+                              0, &n_extracted, &found, &endpos);
+
+    cli_dbgmsg("dicom: walk ended at %zu/%zu, %u object(s) extracted, ret %d\n",
+               endpos, (size_t)ctx->fmap->len, n_extracted, ret);
+
+    if (found) {
+        return CL_VIRUS;
+    }
+    if (CL_EPARSE == ret) {
+        /* malformed element stream: not an error verdict — the engine's raw
+         * scan of this layer covers the bytes the walk could not interpret */
+        cli_dbgmsg("dicom: malformed element stream, walk stopped early\n");
+        return CL_SUCCESS;
+    }
+    return ret;
 }
