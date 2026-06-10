@@ -142,6 +142,7 @@ static const struct ftmap_s {
     { "CL_TYPE_ONENOTE",            CL_TYPE_ONENOTE         },
     { "CL_TYPE_PYTHON_COMPILED",    CL_TYPE_PYTHON_COMPILED },
     { "CL_TYPE_LHA_LZH",            CL_TYPE_LHA_LZH         },
+    { "CL_TYPE_DICOM",              CL_TYPE_DICOM           },
     { NULL,                         CL_TYPE_IGNORED         }
 };
 // clang-format on

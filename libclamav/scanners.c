@@ -86,6 +86,7 @@
 #include "autoit.h"
 #include "textnorm.h"
 #include "unzip.h"
+#include "dicom.h"
 #include "dlp.h"
 #include "default.h"
 #include "cpio.h"
@@ -4594,6 +4595,11 @@ cl_error_t cli_magic_scan(cli_ctx *ctx, cli_file_t type)
         case CL_TYPE_ZIP:
             if (SCAN_PARSE_ARCHIVE && (DCONF_ARCH & ARCH_CONF_ZIP))
                 ret = cli_unzip(ctx);
+            break;
+
+        case CL_TYPE_DICOM:
+            if (SCAN_PARSE_ARCHIVE)
+                ret = cli_scandicom(ctx);
             break;
 
         case CL_TYPE_GZ:

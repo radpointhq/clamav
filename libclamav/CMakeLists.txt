@@ -368,6 +368,8 @@ set(LIBCLAMAV_SOURCES
     untar.c             untar.h
     # ZIP archive
     unzip.c             unzip.h
+    # DICOM medical imaging container (forked)
+    dicom.c             dicom.h
     # DMG archive
     adc.c               adc.h
     dmg.c               dmg.h
