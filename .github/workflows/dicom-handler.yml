@@ -1,0 +1,66 @@
+name: DICOM handler
+
+# Focused CI for the forked CL_TYPE_DICOM handler (libclamav/dicom.c).
+# Upstream's cmake.yml only triggers on rel/*, dev/*, feature/*, main — this
+# guards the DICOM feature branch and any PR that touches the handler.
+
+on:
+  push:
+    branches:
+      - dicom-handler
+  pull_request:
+    paths:
+      - "libclamav/dicom.*"
+      - "libclamav/filetypes*"
+      - "libclamav/scanners.c"
+      - "unit_tests/dicom_handler/**"
+      - ".github/workflows/dicom-handler.yml"
+  workflow_dispatch:
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: libclamav_rust
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: dicom-handler-${{ runner.os }}
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bison flex \
+            check libbz2-dev libcurl4-openssl-dev libjson-c-dev \
+            libncurses5-dev libpcre2-dev libssl-dev libxml2-dev zlib1g-dev
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DENABLE_TESTS=OFF \
+            -DENABLE_MILTER=OFF \
+            -DENABLE_MAN_PAGES=OFF \
+            -DENABLE_CLAMONACC=OFF \
+            -DENABLE_SYSTEMD=OFF
+
+      - name: Build clamscan
+        run: cmake --build build --target clamscan -j"$(nproc)"
+
+      - name: Run DICOM handler tests
+        run: ./unit_tests/dicom_handler/run_tests.sh ./build/clamscan/clamscan
