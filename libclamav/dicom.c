@@ -24,6 +24,8 @@
 
 #include <string.h>
 
+#include <zlib.h>
+
 #include "clamav.h"
 #include "others.h"
 #include "scanners.h"
@@ -311,6 +313,112 @@ static cl_error_t dicom_scan_encap_pixeldata(cli_ctx *ctx, size_t off, size_t en
     return ret;
 }
 
+/*
+ * Inflate a Deflated-transfer-syntax dataset (raw DEFLATE, RFC 1951, no zlib
+ * header) and re-inject the inflated dataset into the engine. Output is
+ * capped at the engine's maxscansize (this is the zip-bomb guard); inflation
+ * stops at the cap and scans what was produced. The inflated bytes are a DICOM
+ * dataset without the preamble/"DICM" lead, so the engine raw-scans them — for
+ * the standard deflated transfer syntax pixel data is native (uncompressed),
+ * so signatures in the data are visible after this single inflate.
+ */
+static cl_error_t dicom_scan_deflated(cli_ctx *ctx, size_t off, bool *found)
+{
+    fmap_t *map      = ctx->fmap;
+    cl_error_t ret   = CL_SUCCESS;
+    z_stream strm    = {0};
+    uint8_t *out     = NULL;
+    size_t out_cap   = 0;
+    size_t out_len   = 0;
+    uint64_t max_out = ctx->engine ? ctx->engine->maxscansize : 0;
+    const uint8_t *in;
+    size_t in_len;
+    uint8_t chunk[BUFSIZ];
+
+    if (off >= map->len) {
+        return CL_SUCCESS;
+    }
+    in_len = map->len - off;
+    in     = fmap_need_off_once(map, off, in_len);
+    if (NULL == in) {
+        return CL_SUCCESS;
+    }
+
+    if (0 == max_out || max_out > CLI_MAX_ALLOCATION) {
+        max_out = CLI_MAX_ALLOCATION;
+    }
+
+    if (Z_OK != inflateInit2(&strm, -MAX_WBITS)) {
+        cli_dbgmsg("dicom: inflateInit2 failed for deflated dataset\n");
+        return CL_SUCCESS;
+    }
+    strm.next_in  = (Bytef *)in;
+    strm.avail_in = (uInt)MIN(in_len, (size_t)UINT_MAX);
+
+    do {
+        int zret;
+
+        strm.next_out  = chunk;
+        strm.avail_out = sizeof(chunk);
+        zret           = inflate(&strm, Z_NO_FLUSH);
+
+        if (Z_OK != zret && Z_STREAM_END != zret && Z_BUF_ERROR != zret) {
+            cli_dbgmsg("dicom: inflate error %d on deflated dataset\n", zret);
+            break;
+        }
+
+        size_t produced = sizeof(chunk) - strm.avail_out;
+        if (produced > 0) {
+            if (out_len + produced > max_out) {
+                cli_dbgmsg("dicom: deflated dataset exceeds maxscansize, truncating\n");
+                produced = (size_t)(max_out - out_len);
+                zret     = Z_STREAM_END;
+            }
+            if (out_len + produced > out_cap) {
+                size_t new_cap = out_cap ? out_cap * 2 : (size_t)(64 * 1024);
+                uint8_t *tmp;
+                while (new_cap < out_len + produced) {
+                    new_cap *= 2;
+                }
+                tmp = cli_max_realloc(out, new_cap);
+                if (NULL == tmp) {
+                    ret = CL_EMEM;
+                    break;
+                }
+                out     = tmp;
+                out_cap = new_cap;
+            }
+            memcpy(out + out_len, chunk, produced);
+            out_len += produced;
+        }
+
+        if (Z_STREAM_END == zret || (0 == strm.avail_in && 0 == produced)) {
+            break;
+        }
+        if (CL_SUCCESS != cli_checktimelimit(ctx)) {
+            ret = CL_ETIMEOUT;
+            break;
+        }
+    } while (1);
+
+    inflateEnd(&strm);
+
+    if (CL_SUCCESS == ret && out_len > 0) {
+        cli_dbgmsg("dicom: inflated deflated dataset to %zu bytes\n", out_len);
+        ret = cli_magic_scan_buff(out, out_len, ctx, "dicom_deflated_dataset",
+                                  LAYER_ATTRIBUTES_NONE);
+        if (CL_VIRUS == ret) {
+            *found = true;
+            ret    = SCAN_ALLMATCHES ? CL_SUCCESS : CL_VIRUS;
+        }
+    }
+
+    if (NULL != out) {
+        free(out);
+    }
+    return ret;
+}
+
 static cl_error_t dicom_walk_elements(cli_ctx *ctx, const dicom_metadata *meta,
                                       size_t off, size_t end, unsigned depth,
                                       unsigned *n_extracted, bool *found,
@@ -557,10 +665,11 @@ cl_error_t cli_scandicom(cli_ctx *ctx)
         return CL_SUCCESS;
     }
     if (meta.deflated) {
-        /* TODO: inflate the dataset (raw DEFLATE) under cli_checklimits and
-         * cli_magic_scan_buff() the result */
-        cli_dbgmsg("dicom: deflated dataset not yet inflated\n");
-        return CL_SUCCESS;
+        ret = dicom_scan_deflated(ctx, meta.dataset_offset, &found);
+        if (found) {
+            return CL_VIRUS;
+        }
+        return (CL_EPARSE == ret) ? CL_SUCCESS : ret;
     }
 
     ret = dicom_walk_elements(ctx, &meta, meta.dataset_offset, ctx->fmap->len,
