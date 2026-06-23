@@ -86,6 +86,7 @@
 #include "autoit.h"
 #include "textnorm.h"
 #include "unzip.h"
+#include "dicom.h"
 #include "dlp.h"
 #include "default.h"
 #include "cpio.h"
@@ -4505,6 +4506,18 @@ cl_error_t cli_magic_scan(cli_ctx *ctx, cli_file_t type)
     }
 
     /*
+     * DICOM preamble polyglot check (CVE-2019-11687 / ELFDICOM). Runs
+     * regardless of detected type: a polyglot has its exe magic at offset 0, so
+     * it is typed CL_TYPE_MSEXE/ELF and would otherwise never reach the DICOM
+     * handler. Gated internally on "DICM" at offset 128, so ordinary
+     * executables are unaffected.
+     */
+    ret = cli_dicom_check_preamble_polyglot(ctx);
+    if (result_should_goto_done(ctx, ret, &ret)) {
+        goto done;
+    }
+
+    /*
      * Run the file type parsers that we normally use before the raw scan.
      */
     perf_nested_start(ctx, PERFT_CONTAINER, PERFT_SCAN);
@@ -4594,6 +4607,11 @@ cl_error_t cli_magic_scan(cli_ctx *ctx, cli_file_t type)
         case CL_TYPE_ZIP:
             if (SCAN_PARSE_ARCHIVE && (DCONF_ARCH & ARCH_CONF_ZIP))
                 ret = cli_unzip(ctx);
+            break;
+
+        case CL_TYPE_DICOM:
+            if (SCAN_PARSE_ARCHIVE)
+                ret = cli_scandicom(ctx);
             break;
 
         case CL_TYPE_GZ:

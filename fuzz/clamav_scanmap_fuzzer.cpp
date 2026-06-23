@@ -77,6 +77,8 @@ class ClamAVState
             CL_SCAN_PARSE_XMLDOCS;
 #elif defined(CLAMAV_FUZZ_HWP3)
             CL_SCAN_PARSE_HWP3;
+#elif defined(CLAMAV_FUZZ_DICOM)
+            CL_SCAN_PARSE_ARCHIVE; /* DICOM dispatch is gated on archive parsing */
 #else
             ~(0);
 #endif

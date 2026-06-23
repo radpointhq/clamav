@@ -1114,8 +1114,12 @@ int recvloop(int *socketds, unsigned nsockets, struct cl_engine *engine, unsigne
     if (optget(opts, "ScanArchive")->enabled) {
         logg(LOGG_INFO, "Archive support enabled.\n");
         options.parse |= CL_SCAN_PARSE_ARCHIVE;
+        /* The DICOM handler (CL_TYPE_DICOM) is dispatched under archive
+         * scanning, so its availability tracks ScanArchive. */
+        logg(LOGG_INFO, "DICOM (medical imaging) support enabled.\n");
     } else {
         logg(LOGG_INFO, "Archive support disabled.\n");
+        logg(LOGG_INFO, "DICOM (medical imaging) support disabled (requires ScanArchive).\n");
     }
 
     if (optget(opts, "ScanImage")->enabled) {

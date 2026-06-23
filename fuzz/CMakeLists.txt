@@ -10,7 +10,8 @@ set(SCAN_TARGETS
     ELF
     SWF
     XMLDOCS
-    HWP3)
+    HWP3
+    DICOM)
 
 set(DBLOAD_TARGETS
     CDB
