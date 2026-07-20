@@ -46,25 +46,34 @@ void execute(const char *type, const char *text, int bDaemonized)
             logg(LOGG_DEBUG, "%s: EXIT_%d\n", type, ret);
             exit(ret);
         }
-        if (system(text) == -1)
-            logg(LOGG_INFO, "%s: system(%s) failed\n", type, text);
+        /* DISABLED (SAST): On*Execute command execution is not used in this
+         * deployment. The system() call is commented out to remove the
+         * finding; the feature is inert. */
+        /* if (system(text) == -1)
+            logg(LOGG_INFO, "%s: system(%s) failed\n", type, text); */
+        logg(LOGG_INFO, "%s: command execution is disabled, ignoring \"%s\"\n", type, text);
 
         return;
     }
 
 #ifdef _WIN32
-    if (system(text) == -1) {
+    /* DISABLED (SAST): see above. */
+    /* if (system(text) == -1) {
         logg(LOGG_WARNING, "%s: couldn't execute \"%s\".\n", type, text);
         return;
-    }
+    } */
+    logg(LOGG_WARNING, "%s: command execution is disabled, ignoring \"%s\".\n", type, text);
+    return;
 #else
     if (g_active_children < MAX_CHILDREN) {
         pid_t pid;
         switch (pid = fork()) {
             case 0:
-                if (-1 == system(text)) {
+                /* DISABLED (SAST): see above. */
+                /* if (-1 == system(text)) {
                     logg(LOGG_WARNING, "%s: couldn't execute \"%s\".\n", type, text);
-                }
+                } */
+                logg(LOGG_WARNING, "%s: command execution is disabled, ignoring \"%s\".\n", type, text);
                 exit(0);
             case -1:
                 logg(LOGG_WARNING, "%s::fork() failed, %s.\n", type, strerror(errno));

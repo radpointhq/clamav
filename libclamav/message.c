@@ -2643,7 +2643,13 @@ pop(LINK1 *top, char *buffer)
     LINK1 t1;
 
     if ((t1 = *top) != NULL) {
-        (void)strcpy(buffer, t1->d1);
+        /* Bounded copy (SAST): pop()'s only callers (simil()) pass a
+         * char[MAX_PATTERN_SIZ] destination and reject inputs longer than
+         * MAX_PATTERN_SIZ-1 before pushing, so this never truncates real data;
+         * the explicit bound makes pop() self-defending instead of relying on
+         * the caller's guard. */
+        strncpy(buffer, t1->d1, MAX_PATTERN_SIZ - 1);
+        buffer[MAX_PATTERN_SIZ - 1] = '\0';
         *top = t1->next;
         free(t1->d1);
         free((char *)t1);

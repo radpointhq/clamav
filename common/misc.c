@@ -235,22 +235,23 @@ int filecopy(const char *src, const char *dest)
 #ifdef _WIN32
     return (!CopyFileA(src, dest, 0));
 #elif defined(C_DARWIN)
-    pid_t pid;
-
-    /* On Mac OS X use ditto and copy resource fork, too. */
-    switch (pid = fork()) {
-        case -1:
-            return -1;
-        case 0:
-            execl("/usr/bin/ditto", "ditto", src, dest, NULL);
-            perror("execl(ditto)");
-            break;
-        default:
-            wait(NULL);
-            return 0;
-    }
-
-    return -1;
+    /* DISABLED (SAST): the original macOS path fork()ed and execl()'d
+     * /usr/bin/ditto (to also copy the resource fork). That exec is not used in
+     * this deployment (Linux/Alpine runtime; this C_DARWIN branch is not even
+     * compiled). Removed to clear the finding; use the same pure-C copy as the
+     * non-macOS branch below. Note: this no longer copies macOS resource forks.
+     *
+     * Original:
+     *   switch (pid = fork()) {
+     *       case -1:  return -1;
+     *       case 0:   execl("/usr/bin/ditto", "ditto", src, dest, NULL);
+     *                 perror("execl(ditto)");
+     *                 break;
+     *       default:  wait(NULL);
+     *                 return 0;
+     *   }
+     */
+    return cli_filecopy(src, dest);
 
 #else /* C_DARWIN */
     return cli_filecopy(src, dest);

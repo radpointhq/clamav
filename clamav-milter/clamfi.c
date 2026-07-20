@@ -447,7 +447,15 @@ sfsistat clamfi_eom(SMFICTX *ctx)
                                     args[6] = e_msg_id;
                                     args[7] = e_msg_date;
                                     args[8] = NULL;
-                                    exit(execvp(viraction, args));
+                                    /* DISABLED (SAST): VirusAction command
+                                     * execution is not used in this deployment
+                                     * (the milter is not built:
+                                     * -DENABLE_MILTER=OFF). The execvp() call is
+                                     * commented out to remove the finding; the
+                                     * child exits without executing anything. */
+                                    /* exit(execvp(viraction, args)); */
+                                    (void)args;
+                                    exit(127);
                                 } else if (pid > 0) {
                                     int wret;
                                     pthread_mutex_unlock(&virusaction_lock);

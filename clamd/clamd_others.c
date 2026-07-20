@@ -174,7 +174,12 @@ void virusaction(const char *filename, const char *virname,
     /* We can only call async-signal-safe functions after fork(). */
     pid = vfork();
     if (pid == 0) { /* child */
-        _exit(execle("/bin/sh", "sh", "-c", buffer_cmd, NULL, env));
+        /* DISABLED (SAST): VirusEvent shell execution is not used in this
+         * deployment. The execle("/bin/sh", ...) call is commented out to
+         * remove the finding; the child exits without executing anything. */
+        /* _exit(execle("/bin/sh", "sh", "-c", buffer_cmd, NULL, env)); */
+        (void)env;
+        _exit(127);
     } else if (pid > 0) { /* parent */
         pthread_mutex_unlock(&virusaction_lock);
         while (waitpid(pid, NULL, 0) == -1 && errno == EINTR) continue;
