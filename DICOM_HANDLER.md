@@ -1,7 +1,7 @@
 # DICOM handler for ClamAV — design & development notes
 
 A native `CL_TYPE_DICOM` container handler added to a fork of ClamAV (`radpointhq/clamav`,
-branch `dicom-handler`, off upstream tag `clamav-1.4.4`). It teaches the engine to understand
+branch `dicom-handler`, based on upstream tag `clamav-1.4.6`). It teaches the engine to understand
 the DICOM medical-imaging format so that malware hidden inside DICOM structure is extracted and
 scanned — closing the "DICOM blind spot" where compressed/encapsulated payloads evade raw
 signature matching. It replaces the standalone `dicom-antivirus` ("venkman") HTTP service.
