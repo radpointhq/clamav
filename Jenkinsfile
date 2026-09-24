@@ -10,7 +10,7 @@ properties(
         parameters(
             [
                 string(name: 'VERSION',
-                       defaultValue: '1.4.4',
+                       defaultValue: '1.4.6',
                        description: 'ClamAV version string'),
                 string(name: 'FRAMEWORK_BRANCH',
                        defaultValue: '1.4',
@@ -46,10 +46,10 @@ properties(
                        defaultValue: 'fuzz-regression-1.4',
                        description: 'test-pipelines branch for fuzz regression tests'),
                 string(name: 'FUZZ_CORPUS_BRANCH',
-                       defaultValue: 'master',
+                       defaultValue: '1.4',
                        description: 'private-fuzz-corpus branch'),
                 string(name: 'SHARED_LIB_BRANCH',
-                       defaultValue: 'master',
+                       defaultValue: 'main',
                        description: 'tests-jenkins-shared-libraries branch')
             ]
         )
