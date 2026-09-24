@@ -70,7 +70,10 @@ if(ENABLE_APP)
     # check_clamd is used by the clamd tests
     add_executable(check_clamd)
     target_sources(check_clamd
-        PRIVATE   check_clamd.c checks.h)
+        PRIVATE
+            check_clamd.c
+            checks.h
+            ../clamd/thrmgr.c)
     target_link_libraries(check_clamd
         PRIVATE
             ClamAV::libclamav
@@ -139,6 +142,9 @@ target_compile_definitions(check_clamav PUBLIC OBJDIR="${OBJDIR}" SRCDIR="${SRCD
 ADD_CUSTOM_COMMAND(TARGET check_clamav POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/input/clamav.hdb ${CMAKE_CURRENT_BINARY_DIR}/input/.)
 
+add_executable(check_xlm_scanmap check_xlm_scanmap.c)
+target_link_libraries(check_xlm_scanmap PRIVATE ClamAV::libclamav)
+
 #
 # Paths to pass to our tests via environment variables
 #
@@ -182,6 +188,7 @@ if(WIN32)
     endif()
     file(TO_NATIVE_PATH $<TARGET_FILE:${LIBMSPACK}>                             LIBCLAMMSPACK)
     file(TO_NATIVE_PATH $<TARGET_FILE:check_clamav>                             CHECK_CLAMAV)
+    file(TO_NATIVE_PATH $<TARGET_FILE:check_xlm_scanmap>                        CHECK_XLM_SCANMAP)
     if(ENABLE_APP)
         file(TO_NATIVE_PATH $<TARGET_FILE:check_clamd>                          CHECK_CLAMD)
         file(TO_NATIVE_PATH $<TARGET_FILE:check_fpu_endian>                     CHECK_FPU_ENDIAN)
@@ -244,6 +251,7 @@ else()
     endif()
     set(LIBCLAMMSPACK          $<TARGET_FILE:${LIBMSPACK}>)
     set(CHECK_CLAMAV           $<TARGET_FILE:check_clamav>)
+    set(CHECK_XLM_SCANMAP      $<TARGET_FILE:check_xlm_scanmap>)
     if(ENABLE_APP)
         set(CHECK_CLAMD        $<TARGET_FILE:check_clamd>)
         set(CHECK_FPU_ENDIAN   $<TARGET_FILE:check_fpu_endian>)
@@ -297,6 +305,7 @@ set(ENVIRONMENT
     LIBCLAMUNRARIFACE=${LIBCLAMUNRARIFACE}
     LIBCLAMUNRAR=${LIBCLAMUNRAR}
     CHECK_CLAMAV=${CHECK_CLAMAV}
+    CHECK_XLM_SCANMAP=${CHECK_XLM_SCANMAP}
     CHECK_CLAMD=${CHECK_CLAMD}
     CHECK_FPU_ENDIAN=${CHECK_FPU_ENDIAN}
     CLAMBC=${CLAMBC}

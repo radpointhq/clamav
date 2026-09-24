@@ -102,6 +102,7 @@ void virusaction(const char *filename, const char *virname,
 #define VE_VIRUSNAME "CLAM_VIRUSEVENT_VIRUSNAME"
 
 #define FILENAME_DISABLED_MESSAGE "The filename format character has been disabled due to security concerns, use the 'CLAM_VIRUSEVENT_FILENAME' environment variable instead."
+#define VIRUSNAME_DISABLED_MESSAGE "The virus name format character has been disabled due to security concerns, use the 'CLAM_VIRUSEVENT_VIRUSNAME' environment variable instead."
 
 void virusaction(const char *filename, const char *virname,
                  const struct optstruct *opts)
@@ -147,7 +148,7 @@ void virusaction(const char *filename, const char *virname,
     }
     len = strlen(opt->strarg);
     buffer_cmd =
-        (char *)calloc(len + v * strlen(virname) + f * strlen(FILENAME_DISABLED_MESSAGE) + 1, sizeof(char));
+        (char *)calloc(len + v * strlen(VIRUSNAME_DISABLED_MESSAGE) + f * strlen(FILENAME_DISABLED_MESSAGE) + 1, sizeof(char));
     if (!buffer_cmd) {
         if (path)
             xfree(env[0]);
@@ -158,8 +159,8 @@ void virusaction(const char *filename, const char *virname,
     }
     for (i = 0, j = 0; i < len; i++) {
         if (i + 1 < len && opt->strarg[i] == '%' && opt->strarg[i + 1] == 'v') {
-            strcat(buffer_cmd, virname);
-            j += strlen(virname);
+            strcat(buffer_cmd, VIRUSNAME_DISABLED_MESSAGE);
+            j += strlen(VIRUSNAME_DISABLED_MESSAGE);
             i++;
         } else if (i + 1 < len && opt->strarg[i] == '%' && opt->strarg[i + 1] == 'f') {
             strcat(buffer_cmd, FILENAME_DISABLED_MESSAGE);

@@ -7,12 +7,14 @@ Run clamd (and clamdscan) tests.
 import os
 from pathlib import Path
 import platform
+import re
 import socket
 import subprocess
 import shutil
 import sys
 import time
 import unittest
+import hashlib
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import testcase
@@ -152,7 +154,7 @@ class TC(testcase.TestCase):
             )
         else:
             command = '{clamd} --config-file={clamd_config}'.format(
-                clamd=TC.clamd, clamd_config=TC.clamd_config
+                clamd=TC.clamd, clamd_config=clamd_config
             )
         self.log.info('Starting clamd: {}'.format(command))
         self.proc = subprocess.Popen(
@@ -161,6 +163,19 @@ class TC(testcase.TestCase):
             stdout=sys.stdout.buffer,
             stderr=sys.stdout.buffer,
         )
+
+        startup = self.execute_command(
+            '{clamdscan} --ping 60 -c {clamd_config}'.format(
+                clamdscan=TC.clamdscan,
+                clamd_config=clamd_config,
+            )
+        )
+        poll = self.proc.poll()
+        assert poll == None, (
+            'clamd exited with status {} before becoming ready'.format(poll)
+        )
+        assert startup.ec == 0, 'clamd did not become ready:\n{}'.format(startup.err)
+        self.verify_output(startup.out, expected=['PONG'])
 
     def run_clamdscan(self,
                       scan_args,
@@ -251,6 +266,25 @@ class TC(testcase.TestCase):
             self.verify_output(output.out, expected=expected_out, unexpected=unexpected_out)
         if expected_err != [] or unexpected_err != []:
             self.verify_output(output.err, expected=expected_err, unexpected=unexpected_err)
+
+    @staticmethod
+    def _create_file_symlink(link_path: Path, target_path: Path):
+        try:
+            os.symlink(target_path, link_path)
+            return
+        except OSError:
+            if operating_system != 'windows':
+                raise
+
+        completed = subprocess.run(
+            ['cmd', '/c', 'mklink', str(link_path), str(target_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise OSError('Failed to create file symlink: {}'.format(completed.stdout.strip()))
 
     def test_clamd_00_version(self):
         '''
@@ -402,6 +436,194 @@ class TC(testcase.TestCase):
 
         time.sleep(5)
 
+    @unittest.skipIf(not hasattr(os, 'symlink'), 'This platform does not support symlink creation in the test environment.')
+    def test_clamd_05a_quarantine_copy_uses_real_source_path(self):
+        self.step_name('Testing clamdscan --copy keeps the display path while quarantining the real source path')
+
+        payload = b'CLAM-2976 clamd symlink quarantine payload\n'
+        payload_path = TC.path_tmp / 'clamd-link-target'
+        payload_path.write_bytes(payload)
+
+        link_path = TC.path_tmp / 'clamd-link-source'
+        try:
+            self._create_file_symlink(link_path, payload_path)
+        except OSError:
+            self.skipTest('File symlink creation is not permitted in this test environment.')
+
+        quarantine_dir = TC.path_tmp / 'clamd-link-quarantine'
+        quarantine_dir.mkdir()
+
+        db_dir = TC.path_tmp / 'clamd-link-db'
+        db_dir.mkdir()
+        (db_dir / 'trigger.hdb').write_text(
+            '{}:{}:{}\n'.format(
+                hashlib.sha256(payload).hexdigest(),
+                len(payload),
+                'CLAM-2976-CLAMD-SOURCE-LINK',
+            )
+        )
+
+        config = '''
+            Foreground yes
+            PidFile {pid}
+            DatabaseDirectory {dbdir}
+            LogFileMaxSize 0
+            LogTime yes
+            LogClean yes
+            LogVerbose yes
+            ExitOnOOM yes
+            DetectPUA yes
+            ScanPDF yes
+            CommandReadTimeout 1
+            MaxQueue 800
+            MaxConnectionQueueLength 1024
+            FollowFileSymlinks yes
+            '''.format(pid=TC.clamd_pid, dbdir=db_dir)
+        if operating_system == 'windows':
+            config += '''
+                TCPSocket {socket}
+                TCPAddr localhost
+                '''.format(socket=TC.clamd_port_num)
+        else:
+            config += '''
+                LocalSocket {localsocket}
+                '''.format(localsocket=TC.clamd_socket)
+
+        clamd_config = TC.path_tmp / 'clamd-follow-links.conf'
+        clamd_config.write_text(config)
+
+        self.start_clamd(clamd_config=clamd_config)
+
+        poll = self.proc.poll()
+        assert poll == None
+
+        output = self.execute_command('{clamdscan} --ping 5 --wait --copy={quarantine_dir} -c {clamd_config} {link_path}'.format(
+            clamdscan=TC.clamdscan,
+            quarantine_dir=quarantine_dir,
+            clamd_config=clamd_config,
+            link_path=link_path,
+        ))
+
+        assert output.ec == 1
+        self.verify_output(
+            output.out,
+            expected=[
+                re.escape('{}:'.format(link_path)),
+                'FOUND',
+            ],
+            unexpected=[
+                re.escape('{}:'.format(payload_path)),
+            ],
+        )
+        self.verify_output(
+            output.err,
+            unexpected=[
+                re.escape("Can't copy file '{}'".format(link_path)),
+            ],
+        )
+        self.assertTrue(payload_path.exists(), 'Expected the symlink target to remain in place after the quarantine copy.')
+        self.assertTrue(link_path.exists(), 'Expected the symlink source to remain in place after the quarantine copy.')
+        quarantined_path = quarantine_dir / payload_path.name
+        self.assertFalse((quarantine_dir / link_path.name).exists(), 'Expected clamdscan quarantine copy to avoid naming the quarantine file after the symlink.')
+        self.assertTrue(quarantined_path.exists(), 'Expected clamdscan quarantine copy to use the resolved source basename.')
+        self.assertEqual(payload_path.read_bytes(), quarantined_path.read_bytes(), 'Expected the quarantined file to contain the target file bytes.')
+
+    @unittest.skipIf(not hasattr(os, 'symlink'), 'This platform does not support symlink creation in the test environment.')
+    def test_clamd_05b_quarantine_copy_modes_use_real_source_path(self):
+        self.step_name('Testing clamdscan --copy source binding across scan modes')
+
+        parent_dir = TC.path_tmp / 'clamd-mode-link'
+        parent_dir.mkdir()
+        payload = b'CLAM-2959 clamdscan quarantine mode payload\n'
+        payload_path = parent_dir / 'payload.bin'
+        payload_path.write_bytes(payload)
+
+        link_path = parent_dir / 'payload-link'
+        try:
+            self._create_file_symlink(link_path, payload_path)
+        except OSError:
+            self.skipTest('File symlink creation is not permitted in this test environment.')
+
+        db_dir = TC.path_tmp / 'clamd-mode-db'
+        db_dir.mkdir()
+        (db_dir / 'trigger.hdb').write_text(
+            '{}:{}:{}\n'.format(
+                hashlib.sha256(payload).hexdigest(),
+                len(payload),
+                'CLAM-2959-CLAMDSCAN-MODE-LINK',
+            )
+        )
+
+        config = '''
+            Foreground yes
+            PidFile {pid}
+            DatabaseDirectory {dbdir}
+            LogFileMaxSize 0
+            LogTime yes
+            LogClean yes
+            LogVerbose yes
+            ExitOnOOM yes
+            DetectPUA yes
+            ScanPDF yes
+            CommandReadTimeout 1
+            MaxQueue 800
+            MaxConnectionQueueLength 1024
+            FollowFileSymlinks yes
+            '''.format(pid=TC.clamd_pid, dbdir=db_dir)
+        if operating_system == 'windows':
+            config += '''
+                TCPSocket {socket}
+                TCPAddr localhost
+                '''.format(socket=TC.clamd_port_num)
+        else:
+            config += '''
+                LocalSocket {localsocket}
+                '''.format(localsocket=TC.clamd_socket)
+
+        clamd_config = TC.path_tmp / 'clamd-mode-link.conf'
+        clamd_config.write_text(config)
+
+        self.start_clamd(clamd_config=clamd_config)
+
+        poll = self.proc.poll()
+        assert poll == None
+
+        mode_args = [
+            ('default', ''),
+            ('stream', '--stream'),
+            ('multiscan', '--multiscan'),
+        ]
+        if TC.has_fdpass_support:
+            mode_args.append(('fdpass', '--fdpass'))
+
+        for mode_name, arg_variation in mode_args:
+            quarantine_dir = TC.path_tmp / 'clamd-mode-quarantine-{}'.format(mode_name)
+            quarantine_dir.mkdir()
+
+            output = self.execute_command('{clamdscan} --ping 5 --wait {arg_variation} --copy={quarantine_dir} -c {clamd_config} {link_path}'.format(
+                clamdscan=TC.clamdscan,
+                arg_variation=arg_variation,
+                quarantine_dir=quarantine_dir,
+                clamd_config=clamd_config,
+                link_path=link_path,
+            ))
+
+            assert output.ec == 1
+            self.verify_output(
+                output.out,
+                expected=[
+                    re.escape('{}:'.format(link_path)),
+                    'FOUND',
+                ],
+                unexpected=[
+                    re.escape('{}:'.format(payload_path)),
+                ],
+            )
+            quarantined_path = quarantine_dir / payload_path.name
+            self.assertFalse((quarantine_dir / link_path.name).exists(), 'Expected {} mode to avoid naming the quarantine file after the symlink.'.format(mode_name))
+            self.assertTrue(quarantined_path.exists(), 'Expected {} mode to quarantine using the resolved source basename.'.format(mode_name))
+            self.assertEqual(payload_path.read_bytes(), quarantined_path.read_bytes(), 'Expected {} mode to copy the target file bytes.'.format(mode_name))
+
     def test_clamd_06_HeuristicScanPrecedence_off(self):
         '''
         Verify that HeuristicScanPrecedence off works as expected (default)
@@ -466,7 +688,7 @@ class TC(testcase.TestCase):
         self.log.info('verifying log output from virusaction-test.sh: {}'.format(str(TC.path_tmp / 'test-clamd.log')))
         self.verify_log(str(TC.path_tmp / 'test-clamd.log'),
             expected=['Virus found: ClamAV-Test-File.UNOFFICIAL'],
-            unexpected=['VirusEvent incorrect', 'VirusName incorrect'])
+            unexpected=['VirusEvent incorrect', 'VirusName incorrect', 'VirusName argument incorrect'])
 
     def test_clamd_09_clamdscan_ExcludePath(self):
         '''
@@ -637,7 +859,11 @@ class TC(testcase.TestCase):
         output = self.execute_command('{clamdscan} -c {clamd_config} --wait --ping 10 {test_exe}'.format(
             clamdscan=TC.clamdscan, clamd_config=clamd_config, test_exe=big_file))
         expected_results = ['MaxFileSize FOUND']
-        unexpected_results = ['OK', 'MaxScanSize FOUND', 'Can\'t allocate memory ERROR']
+        unexpected_results = [
+            testcase.CLEAN_SCAN_RESULT,
+            'MaxScanSize FOUND',
+            'Can\'t allocate memory ERROR',
+        ]
         self.verify_output(output.out, expected=expected_results, unexpected=unexpected_results)
         assert output.ec == 1
 
@@ -645,7 +871,11 @@ class TC(testcase.TestCase):
         output = self.execute_command('{clamdscan} -c {clamd_config} {test_exe}'.format(
             clamdscan=TC.clamdscan, clamd_config=clamd_config, test_exe=big_zip))
         expected_results = ['MaxScanSize FOUND']
-        unexpected_results = ['OK', 'MaxFileSize FOUND', 'Can\'t allocate memory ERROR']
+        unexpected_results = [
+            testcase.CLEAN_SCAN_RESULT,
+            'MaxFileSize FOUND',
+            'Can\'t allocate memory ERROR',
+        ]
         self.verify_output(output.out, expected=expected_results, unexpected=unexpected_results)
         assert output.ec == 1
 

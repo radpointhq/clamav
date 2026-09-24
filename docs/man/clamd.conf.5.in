@@ -294,12 +294,12 @@ Execute a command when virus is found.
 Use the following environment variables to identify the file and virus names:
 - $CLAM_VIRUSEVENT_FILENAME
 - $CLAM_VIRUSEVENT_VIRUSNAME
-In the command string, '%v' will also be replaced with the virus name.
-Note: The '%f' filename format character has been disabled and will no longer
-be replaced with the file name, due to command injection security concerns.
-Use the 'CLAM_VIRUSEVENT_FILENAME' environment variable instead.
-For the same reason, you should NOT use the environment variables in the
-command directly, but should use it carefully from your executed script.
+Note: The '%v' virus name and '%f' filename format characters have been
+disabled and will no longer be replaced with the virus or file name, due to
+command injection security concerns. Use the environment variables listed
+above instead.
+For the same reason, you should NOT use the environment variables directly
+in the command, but should use them carefully from your executed script.
 \fR
 .br
 Default: disabled

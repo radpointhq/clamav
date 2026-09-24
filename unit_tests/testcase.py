@@ -27,8 +27,36 @@ TIMEOUT_EXIT_CODE = 111
 STRICT_ORDER = 0
 ANY_ORDER = 1
 CHUNK_SIZE = 100
+CLEAN_SCAN_RESULT = r": OK(?:\r?\n|$)"
 
 loggers = {}
+
+_VALGRIND_TRACK_FDS_MODE = None
+
+
+def _get_valgrind_track_fds_mode(valgrind):
+    """Select the best fd tracking mode supported by Valgrind."""
+    global _VALGRIND_TRACK_FDS_MODE
+
+    if _VALGRIND_TRACK_FDS_MODE is None:
+        version_output = subprocess.check_output(
+            [str(valgrind), "--version"], universal_newlines=True
+        )
+        version = re.search(r"(\d+)\.(\d+)", version_output)
+
+        # Valgrind 3.23 made descriptors left open at process exit errors.
+        # The "bad" mode, added in 3.26, reports invalid descriptor use
+        # without treating descriptors inherited across exec or intentionally
+        # closed by process exit as failures.
+        version_tuple = tuple(map(int, version.groups())) if version else (0, 0)
+        if version_tuple >= (3, 26):
+            _VALGRIND_TRACK_FDS_MODE = "bad"
+        elif version_tuple >= (3, 23):
+            _VALGRIND_TRACK_FDS_MODE = "no"
+        else:
+            _VALGRIND_TRACK_FDS_MODE = "yes"
+
+    return _VALGRIND_TRACK_FDS_MODE
 
 #TODO: replace w/ this when Python 3.5 support is dropped.
 # class CmdResult(NamedTuple):
@@ -53,6 +81,7 @@ class TestCase(unittest.TestCase):
     check_clamav = None
     check_clamd = None
     check_fpu_endian = None
+    check_xlm_scanmap = None
     milter = None
     clambc = None
     clamd = None
@@ -106,6 +135,11 @@ class TestCase(unittest.TestCase):
         cls.check_clamav =     Path(os.getenv("CHECK_CLAMAV"))     if os.getenv("CHECK_CLAMAV") != None else None
         cls.check_clamd =      Path(os.getenv("CHECK_CLAMD"))      if os.getenv("CHECK_CLAMD") != None else None
         cls.check_fpu_endian = Path(os.getenv("CHECK_FPU_ENDIAN")) if os.getenv("CHECK_FPU_ENDIAN") != None else None
+        cls.check_xlm_scanmap = (
+            Path(os.getenv("CHECK_XLM_SCANMAP"))
+            if os.getenv("CHECK_XLM_SCANMAP") != None
+            else None
+        )
         cls.milter =           Path(os.getenv("CLAMAV_MILTER"))    if os.getenv("CLAMAV_MILTER") != None else None
         cls.clambc =           Path(os.getenv("CLAMBC"))           if os.getenv("CLAMBC") != None else None
         cls.clamd =            Path(os.getenv("CLAMD"))            if os.getenv("CLAMD") != None else None
@@ -127,7 +161,8 @@ class TestCase(unittest.TestCase):
         if os.getenv('VALGRIND') != None:
             cls.log_suffix = '.valgrind.log'
             cls.valgrind = Path(os.getenv("VALGRIND"))
-            cls.valgrind_args = '-v --trace-children=yes --track-fds=yes --leak-check=full --show-possibly-lost=no ' + \
+            track_fds_mode = _get_valgrind_track_fds_mode(cls.valgrind)
+            cls.valgrind_args = '-v --trace-children=yes --track-fds={} --leak-check=full --show-possibly-lost=no '.format(track_fds_mode) + \
                                 '--show-leak-kinds=definite --errors-for-leak-kinds=definite --main-stacksize=16777216 --gen-suppressions=all ' + \
                                 '--suppressions={} '.format(cls.path_source / "unit_tests" / "valgrind.supp") + \
                                 '--log-file={} '.format(cls.path_tmp / "valgrind.log")                        + \

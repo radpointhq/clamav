@@ -271,7 +271,6 @@ CLAMAV_PRIVATE {
     cl_verify_signature_hash_x509;
     cl_verify_signature_hash_x509_keyfile;
     cl_load_cert;
-    cl_ASN1_GetTimeT;
     cl_load_crl;
     cl_sign_data_keyfile;
     cl_sign_data;
@@ -306,9 +305,12 @@ CLAMAV_PRIVATE {
     ffierror_fmt;
     cli_magic_scan_buff;
     cli_checklimits;
+    cli_checktimelimit;
+    cli_append_potentially_unwanted_if_heur_exceedsmax;
     cli_matchmeta;
     cli_cvdunpack_and_verify;
     cli_cvdverify;
+    cli_newfilepath;
 
     __cli_strcasestr;
     __cli_strndup;

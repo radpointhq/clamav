@@ -3835,17 +3835,17 @@ static const char *get_function_name(unsigned index)
     }
 }
 
-static cl_error_t parse_formula(FILE *out_file, char data[], unsigned data_size)
+static cl_error_t parse_formula(FILE *out_file, const uint8_t data[], size_t data_size)
 {
     cl_error_t status = CL_EFORMAT;
-    unsigned data_pos = 0;
+    size_t data_pos   = 0;
     int len;
     size_t size_written;
 
     while (data_pos < data_size) {
         ptg_expr ptg = data[data_pos] & 0x7f;
 
-        if (((uint8_t)data[data_pos]) < sizeof(TOKENS) / sizeof(TOKENS[0])) {
+        if (ptg < sizeof(TOKENS) / sizeof(TOKENS[0]) && NULL != TOKENS[ptg]) {
             len = fprintf(out_file, " %s", TOKENS[ptg]);
             if (len < 0) {
                 cli_dbgmsg("[cli_extract_xlm_macros_and_images:parse_formula] Error formatting token name\n");
@@ -3869,21 +3869,28 @@ static cl_error_t parse_formula(FILE *out_file, char data[], unsigned data_size)
             case ptgRange:
                 data_pos += 1;
                 break;
-            case ptgStr:
-                if (data_pos + 2 >= data_size) {
+            case ptgStr: {
+                size_t char_count;
+                size_t str_len;
+
+                if (data_size - data_pos < 3) {
                     cli_dbgmsg("[cli_extract_xlm_macros_and_images:parse_formula] Malformed ptgStr record\n");
                     goto done;
                 }
 
-                if (data[data_pos + 2] == 1 && data_pos + 2 + 2 * data[data_pos + 1] <= data_size) {
+                char_count = data[data_pos + 1];
+
+                if (data[data_pos + 2] == 1) {
                     char *utf8       = NULL;
                     size_t utf8_size = 0;
-                    // TODO: Is this really times two here? Or is the string length in bytes?
-                    size_t str_len = data[data_pos + 1] * 2;
-                    if (str_len > data_size - data_pos) {
-                        str_len = data_size - data_pos;
+
+                    if (char_count > (data_size - data_pos - 3) / 2) {
+                        cli_dbgmsg("[cli_extract_xlm_macros_and_images:parse_formula] Truncated UTF16 ptgStr record\n");
+                        goto done;
                     }
-                    if (CL_SUCCESS == cli_codepage_to_utf8(&data[data_pos + 3], str_len, CODEPAGE_UTF16_LE, &utf8, &utf8_size)) {
+
+                    str_len = char_count * 2;
+                    if (CL_SUCCESS == cli_codepage_to_utf8((char *)&data[data_pos + 3], str_len, CODEPAGE_UTF16_LE, &utf8, &utf8_size)) {
                         if (0 < utf8_size) {
                             size_written = fwrite(utf8, 1, utf8_size, out_file);
                             free(utf8);
@@ -3901,15 +3908,17 @@ static cl_error_t parse_formula(FILE *out_file, char data[], unsigned data_size)
                         }
                     }
                     data_pos += 3 + str_len;
-                } else if (data[data_pos + 2] == 0 && data_pos + 2 + data[data_pos + 1] <= data_size) {
-                    unsigned str_len = data[data_pos + 1];
-                    if (str_len > data_size - data_pos) {
-                        str_len = data_size - data_pos;
+                } else if (data[data_pos + 2] == 0) {
+                    if (char_count > data_size - data_pos - 3) {
+                        cli_dbgmsg("[cli_extract_xlm_macros_and_images:parse_formula] Truncated ANSI ptgStr record\n");
+                        goto done;
                     }
+
+                    str_len = char_count;
                     if (0 < str_len) {
-                        size_written = fwrite(&data[data_pos], 1, str_len, out_file);
+                        size_written = fwrite(&data[data_pos + 3], 1, str_len, out_file);
                         if (size_written < str_len) {
-                            cli_dbgmsg("[cli_extract_xlm_macros_and_images] Error writing STRING record message with UTF16LE content\n");
+                            cli_dbgmsg("[cli_extract_xlm_macros_and_images] Error writing ptgStr record with ANSI content\n");
                             goto done;
                         }
                     }
@@ -3919,8 +3928,9 @@ static cl_error_t parse_formula(FILE *out_file, char data[], unsigned data_size)
                     goto done;
                 }
                 break;
+            }
             case ptgAttr:
-                if (data_pos + 1 >= data_size) {
+                if (data_size - data_pos < 4) {
                     cli_dbgmsg("[cli_extract_xlm_macros_and_images:parse_formula] Malformed ptgAttr record\n");
                     goto done;
                 }
@@ -3928,12 +3938,12 @@ static cl_error_t parse_formula(FILE *out_file, char data[], unsigned data_size)
                 if (data[data_pos + 1] & 0x40) {
                     uint16_t coffset;
 
-                    if (data_pos + 3 >= data_size) {
+                    coffset = data[data_pos + 2] | (data[data_pos + 3] << 8);
+
+                    if ((size_t)coffset + 1 > (data_size - data_pos - 4) / 2) {
                         cli_dbgmsg("[cli_extract_xlm_macros_and_images:parse_formula] Malformed ptgAttrChoose record\n");
                         goto done;
                     }
-
-                    coffset = data[data_pos + 2] | (data[data_pos + 3] << 8);
 
                     len = fprintf(out_file, " CHOOSE (%u)", (unsigned)(coffset + 1));
                     if (len < 0) {
@@ -3947,7 +3957,7 @@ static cl_error_t parse_formula(FILE *out_file, char data[], unsigned data_size)
                 }
                 break;
             case ptgBool:
-                if (data_pos + 1 >= data_size) {
+                if (data_size - data_pos < 2) {
                     cli_dbgmsg("[cli_extract_xlm_macros_and_images:parse_formula] Malformed ptgBool record\n");
                     goto done;
                 }
@@ -3961,7 +3971,7 @@ static cl_error_t parse_formula(FILE *out_file, char data[], unsigned data_size)
                 data_pos += 2;
                 break;
             case ptgInt:
-                if (data_pos + 2 >= data_size) {
+                if (data_size - data_pos < 3) {
                     cli_dbgmsg("[cli_extract_xlm_macros_and_images:parse_formula] Malformed ptgInt record\n");
                     goto done;
                 }
@@ -3977,7 +3987,7 @@ static cl_error_t parse_formula(FILE *out_file, char data[], unsigned data_size)
             case ptgFunc:
             case ptgFuncV:
             case ptgFuncA: {
-                if (data_pos + 2 >= data_size) {
+                if (data_size - data_pos < 3) {
                     cli_dbgmsg("[cli_extract_xlm_macros_and_images:parse_formula] Malformed ptgFunc record\n");
                     goto done;
                 }
@@ -3997,7 +4007,7 @@ static cl_error_t parse_formula(FILE *out_file, char data[], unsigned data_size)
             case ptgFuncVar:
             case ptgFuncVarV:
             case ptgFuncVarA: {
-                if (data_pos + 3 >= data_size) {
+                if (data_size - data_pos < 4) {
                     cli_dbgmsg("[cli_extract_xlm_macros_and_images:parse_formula] Malformed ptgFuncVar record\n");
                     goto done;
                 }
@@ -4018,12 +4028,16 @@ static cl_error_t parse_formula(FILE *out_file, char data[], unsigned data_size)
 
                 data_pos += 4;
                 if (func_id == 0x806d) {
+                    if (data_size - data_pos < 9) {
+                        cli_dbgmsg("[cli_extract_xlm_macros_and_images:parse_formula] Malformed extended ptgFuncVar record\n");
+                        goto done;
+                    }
                     data_pos += 9;
                 }
                 break;
             }
             case ptgName: {
-                if (data_pos + 4 >= data_size) {
+                if (data_size - data_pos < 5) {
                     cli_dbgmsg("[cli_extract_xlm_macros_and_images:parse_formula] Malformed ptgName record\n");
                     goto done;
                 }
@@ -4040,7 +4054,7 @@ static cl_error_t parse_formula(FILE *out_file, char data[], unsigned data_size)
                 break;
             }
             case ptgNum: {
-                if (data_pos + 8 >= data_size) {
+                if (data_size - data_pos < 9) {
                     cli_dbgmsg("[cli_extract_xlm_macros_and_images:parse_formula] Malformed ptgNum record\n");
                     goto done;
                 }
@@ -4059,7 +4073,7 @@ static cl_error_t parse_formula(FILE *out_file, char data[], unsigned data_size)
                 break;
             }
             case ptgMemArea: {
-                if (data_pos + 6 >= data_size) {
+                if (data_size - data_pos < 7) {
                     cli_dbgmsg("[cli_extract_xlm_macros_and_images:parse_formula] Malformed ptgMemArea record\n");
                     goto done;
                 }
@@ -4074,7 +4088,7 @@ static cl_error_t parse_formula(FILE *out_file, char data[], unsigned data_size)
                 break;
             }
             case ptgExp: {
-                if (data_pos + 4 >= data_size) {
+                if (data_size - data_pos < 5) {
                     cli_dbgmsg("[cli_extract_xlm_macros_and_images:parse_formula] Malformed ptgExp record\n");
                     goto done;
                 }
@@ -4092,7 +4106,7 @@ static cl_error_t parse_formula(FILE *out_file, char data[], unsigned data_size)
             }
             case ptgRef:
             case ptgRefV: {
-                if (data_pos + 4 >= data_size) {
+                if (data_size - data_pos < 5) {
                     cli_dbgmsg("[cli_extract_xlm_macros_and_images:parse_formula] Malformed ptgRef record\n");
                     goto done;
                 }
@@ -4115,7 +4129,7 @@ static cl_error_t parse_formula(FILE *out_file, char data[], unsigned data_size)
                 break;
             }
             case ptgArea: {
-                if (data_pos + 8 >= data_size) {
+                if (data_size - data_pos < 9) {
                     cli_dbgmsg("[cli_extract_xlm_macros_and_images:parse_formula] Malformed ptgArea record\n");
                     goto done;
                 }
@@ -4146,7 +4160,7 @@ static cl_error_t parse_formula(FILE *out_file, char data[], unsigned data_size)
             }
             case ptgRef3d:
             case ptgRef3dV: {
-                if (data_pos + 6 >= data_size) {
+                if (data_size - data_pos < 7) {
                     cli_dbgmsg("[cli_extract_xlm_macros_and_images:parse_formula] Malformed ptgRef3d record\n");
                     goto done;
                 }
@@ -4170,7 +4184,7 @@ static cl_error_t parse_formula(FILE *out_file, char data[], unsigned data_size)
                 break;
             }
             case ptgNameX: {
-                if (data_pos + 6 >= data_size) {
+                if (data_size - data_pos < 7) {
                     cli_dbgmsg("[cli_extract_xlm_macros_and_images:parse_formula] Malformed ptgNameX record\n");
                     goto done;
                 }
@@ -4190,7 +4204,7 @@ static cl_error_t parse_formula(FILE *out_file, char data[], unsigned data_size)
                 break;
             }
             default:
-                if (ptg < sizeof(TOKENS) / sizeof(char *)) {
+                if (ptg < sizeof(TOKENS) / sizeof(TOKENS[0]) && NULL != TOKENS[ptg]) {
                     cli_dbgmsg("[cli_extract_xlm_macros_and_images:parse_formula] Encountered unexpected ptg token: %s\n", TOKENS[ptg]);
                 } else {
                     cli_dbgmsg("[cli_extract_xlm_macros_and_images:parse_formula] Encountered unknown ptg token: 0x%02x\n", ptg);
@@ -4709,7 +4723,7 @@ cl_error_t cli_extract_xlm_macros_and_images(const char *dir, cli_ctx *ctx, char
                     uint16_t length;
                 } formula_header;
 
-                if (biff_header.length >= 21) {
+                if (biff_header.length >= 22) {
                     formula_header.row    = data[0] | (data[1] << 8);
                     formula_header.column = data[2] | (data[3] << 8);
                     formula_header.length = data[20] | (data[21] << 8);
@@ -4727,7 +4741,12 @@ cl_error_t cli_extract_xlm_macros_and_images(const char *dir, cli_ctx *ctx, char
                         break;
                     }
 
-                    ret = parse_formula(out_file, &data[22], biff_header.length - 21);
+                    if (formula_header.length > biff_header.length - 22) {
+                        cli_dbgmsg("[cli_extract_xlm_macros_and_images] FORMULA token data exceeds record length\n");
+                        break;
+                    }
+
+                    ret = parse_formula(out_file, (const uint8_t *)&data[22], formula_header.length);
                     if (CL_SUCCESS != ret) {
                         cli_dbgmsg("[cli_extract_xlm_macros_and_images] Error parsing formula in FORMULA record message\n");
 
@@ -4886,8 +4905,16 @@ cl_error_t cli_extract_xlm_macros_and_images(const char *dir, cli_ctx *ctx, char
                     }
 
                     if (!(flags & 0x1)) {
-                        // String is compressed
-                        len = fprintf(out_file, " - \"%.*s\"", (int)(biff_header.length - 3), &data[6]);
+                        // String is compressed (one byte per character). The character data
+                        // begins at offset 3, after the 2-byte character count and the flags
+                        // byte, the same offset the UTF-16 branch below reads from. Clamp the
+                        // printed length to the bytes actually present in the record so a
+                        // malformed character count cannot read past the record buffer.
+                        if (string_length > biff_header.length - 3) {
+                            string_length = biff_header.length - 3;
+                        }
+
+                        len = fprintf(out_file, " - \"%.*s\"", (int)string_length, &data[3]);
                         if (len < 0) {
                             cli_dbgmsg("[cli_extract_xlm_macros_and_images] Error formatting STRING record message with ANSI content\n");
 
@@ -4956,6 +4983,12 @@ cl_error_t cli_extract_xlm_macros_and_images(const char *dir, cli_ctx *ctx, char
     }
 
     /* Scan the extracted content */
+    if (0 != fflush(out_file)) {
+        cli_dbgmsg("cli_extract_xlm_macros_and_images: Failed to flush extracted XLM macro content\n");
+        status = CL_EWRITE;
+        goto done;
+    }
+
     if (lseek(out_fd, 0, SEEK_SET) != 0) {
         cli_dbgmsg("cli_extract_xlm_macros_and_images: Failed to seek to beginning of temporary file\n");
         status = CL_ESEEK;

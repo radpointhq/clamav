@@ -838,9 +838,13 @@ static cl_error_t hfsplus_seek_to_cmpf_resource(int fd, size_t *size)
     hfsPlusResourceType resourceType;
     hfsPlusReferenceEntry entry;
     int i;
-    int cmpfInstanceIdx = -1;
-    int curInstanceIdx  = 0;
+    bool foundCmpf = false;
+    uint64_t cmpfInstanceIdx = 0;
+    uint64_t curInstanceIdx  = 0;
+    uint64_t referenceOffset;
+    uint64_t referencePosition;
     size_t dataOffset;
+    uint64_t currentOffset;
     uint64_t resourceForkSize;
     uint64_t resourceOffset;
     off_t seekOffset;
@@ -919,26 +923,61 @@ static cl_error_t hfsplus_seek_to_cmpf_resource(int fd, size_t *size)
         resourceType.referenceListOffset = be16_to_host(resourceType.referenceListOffset);
 
         if (memcmp(resourceType.type, "cmpf", 4) == 0) {
-            if (cmpfInstanceIdx != -1) {
+            if (foundCmpf) {
                 cli_dbgmsg("hfsplus_seek_to_cmpf_resource: There are several cmpf resource types in the file\n");
                 status = CL_EFORMAT;
                 goto done;
             }
 
             cmpfInstanceIdx = curInstanceIdx;
+            foundCmpf       = true;
             cli_dbgmsg("Found compressed resource type!\n");
         }
 
-        curInstanceIdx += resourceType.instanceCount + 1;
+        if (curInstanceIdx > UINT64_MAX - resourceType.instanceCount - 1) {
+            cli_dbgmsg("hfsplus_seek_to_cmpf_resource: Resource instance index overflow\n");
+            status = CL_EFORMAT;
+            goto done;
+        }
+        curInstanceIdx += (uint64_t)resourceType.instanceCount + 1;
     }
 
-    if (cmpfInstanceIdx < 0) {
+    if (!foundCmpf) {
         cli_dbgmsg("hfsplus_seek_to_cmpf_resource: Didn't find cmpf resource type\n");
         status = CL_EFORMAT;
         goto done;
     }
 
-    if (lseek(fd, cmpfInstanceIdx * sizeof(hfsPlusReferenceEntry), SEEK_CUR) < 0) {
+    if (cmpfInstanceIdx > UINT64_MAX / sizeof(hfsPlusReferenceEntry)) {
+        cli_dbgmsg("hfsplus_seek_to_cmpf_resource: Resource instance offset overflow\n");
+        status = CL_EFORMAT;
+        goto done;
+    }
+    referenceOffset = cmpfInstanceIdx * sizeof(hfsPlusReferenceEntry);
+
+    if ((seekOffset = lseek(fd, 0, SEEK_CUR)) < 0) {
+        cli_dbgmsg("hfsplus_seek_to_cmpf_resource: Failed to determine reference list offset\n");
+        status = CL_ESEEK;
+        goto done;
+    }
+    currentOffset = (uint64_t)seekOffset;
+
+    if (currentOffset > resourceForkSize ||
+        referenceOffset > resourceForkSize - currentOffset ||
+        (uint64_t)sizeof(entry) > resourceForkSize - currentOffset - referenceOffset) {
+        cli_dbgmsg("hfsplus_seek_to_cmpf_resource: Resource instance offset extends past the resource fork\n");
+        status = CL_EFORMAT;
+        goto done;
+    }
+
+    referencePosition = currentOffset + referenceOffset;
+    if ((off_t)referencePosition < 0 || (uint64_t)(off_t)referencePosition != referencePosition) {
+        cli_dbgmsg("hfsplus_seek_to_cmpf_resource: Resource instance offset overflow\n");
+        status = CL_EFORMAT;
+        goto done;
+    }
+
+    if (lseek(fd, (off_t)referencePosition, SEEK_SET) != (off_t)referencePosition) {
         cli_dbgmsg("hfsplus_seek_to_cmpf_resource: Failed to seek to instance index\n");
         status = CL_ESEEK;
         goto done;
@@ -1163,7 +1202,7 @@ static cl_error_t hfsplus_walk_catalog(cli_ctx *ctx, hfsPlusVolumeHeader *volHea
         /* offsets take 1 u16 per at the end of the node, along with an empty space offset */
         topOfOffsets = nodeSize - (nodeDesc.numRecords * 2) - 2;
         for (recordNum = 0; recordNum < nodeDesc.numRecords; recordNum++) {
-            uint16_t keylen;
+            uint32_t keylen;
             int16_t rectype;
             hfsPlusCatalogFile fileRec;
             name_utf8 = NULL;

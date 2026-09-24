@@ -1,11 +1,8 @@
 
 # Copyright (C) 2019-2026 Cisco Systems, Inc. and/or its affiliates. All rights reserved.
 
-if(WIN32)
-    cmake_minimum_required( VERSION 3.16 ) # For file(GET_RUNTIME_DEPENDENCIES)
-else()
-    cmake_minimum_required( VERSION 3.14 )
-endif()
+# CMake 3.17 preserves link directories from private static dependencies.
+cmake_minimum_required( VERSION 3.17 )
 
 set(CMAKE_C_STANDARD 90)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -867,6 +864,7 @@ if(WIN32)
     set(HAVE_MKSTEMP 1)
     set(HAVE_POLL 1)
 else()
+    check_symbol_exists(funlinkat        "unistd.h"      HAVE_FUNLINKAT)
     check_symbol_exists(fseeko          "stdio.h"       HAVE_FSEEKO)
     check_symbol_exists(getaddrinfo     "netdb.h"       HAVE_GETADDRINFO)
     check_symbol_exists(getpagesize     "unistd.h"      HAVE_GETPAGESIZE)
